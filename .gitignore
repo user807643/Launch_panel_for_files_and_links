@@ -26,3 +26,7 @@ env/
 # OS files
 Thumbs.db
 .DS_Store
+
+# PyInstaller build output
+build/
+dist/

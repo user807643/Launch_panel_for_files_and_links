@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 «Запуск программ» — портативная программа быстрого запуска файлов.
 
@@ -20,7 +19,6 @@ from tkinter import filedialog
 APP_TITLE = "Запуск программ"
 CONFIG_NAME = "settings.json"
 
-# Цвета кнопок: зелёный — запуск удался, красный — не удался.
 COLOR_OK = "#3CB371"
 COLOR_FAIL = "#E53935"
 COLOR_TEXT = "#FFFFFF"
@@ -60,9 +58,6 @@ DEFAULTS = {
 }
 
 
-# --------------------------------------------------------------------------
-# Пути и настройки
-# --------------------------------------------------------------------------
 
 def app_dir():
     """Папка программы.
@@ -167,9 +162,6 @@ def save_config(path, cfg):
     os.replace(tmp, path)
 
 
-# --------------------------------------------------------------------------
-# Масштаб экрана
-# --------------------------------------------------------------------------
 
 def dpi_scale():
     """Множитель масштаба, чтобы окно не было размытым на мониторах 125–200%."""
@@ -180,7 +172,7 @@ def dpi_scale():
         except (AttributeError, OSError):
             ctypes.windll.user32.SetProcessDPIAware()
         hdc = ctypes.windll.user32.GetDC(0)
-        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
         ctypes.windll.user32.ReleaseDC(0, hdc)
         if dpi and dpi > 0:
             return dpi / 96.0
@@ -189,9 +181,6 @@ def dpi_scale():
     return 1.0
 
 
-# --------------------------------------------------------------------------
-# Окно
-# --------------------------------------------------------------------------
 
 class LaunchApp(tk.Tk):
 
@@ -203,8 +192,8 @@ class LaunchApp(tk.Tk):
         self.cfg, self.load_note = load_config(self.config_path)
         self.s = self.cfg["settings"]
 
-        self.buttons = []       # ссылки на кнопки
-        self.path_vars = []     # StringVar с путями
+        self.buttons = []
+        self.path_vars = []
         self.status_text = tk.StringVar(value="")
 
         self._build_window()
@@ -222,12 +211,9 @@ class LaunchApp(tk.Tk):
                 COLOR_STATUS_NEUTRAL,
             )
 
-        # При первом запуске создаём конфиг сразу, чтобы файл настроек
-        # существовал рядом с программой и его можно было отредактировать.
         if not os.path.exists(self.config_path):
             self.save()
 
-    # -- удобные преобразования геометрии ---------------------------------
 
     def px(self, value):
         return int(round(float(value) * self.scale))
@@ -236,7 +222,6 @@ class LaunchApp(tk.Tk):
         """Отрицательный размер задаёт высоту в пикселях — предсказуемо при DPI."""
         return (self.s["font_family"], -self.px(self.s[key]))
 
-    # -- построение интерфейса --------------------------------------------
 
     def _build_window(self):
         self.title(self.s["title"] or APP_TITLE)
@@ -301,8 +286,6 @@ class LaunchApp(tk.Tk):
             )
             button.place(x=left, y=row_y, width=btn_w, height=btn_h)
 
-            # Вертикальная подпись: у виджета Label нет поворота текста,
-            # поэтому рисуем на Canvas с параметром angle (Tk 8.6+).
             canvas = tk.Canvas(
                 self, width=label_w, height=btn_h,
                 bg=COLOR_BG, highlightthickness=0, bd=0,
@@ -321,10 +304,6 @@ class LaunchApp(tk.Tk):
                 self, textvariable=var, font=self.font("font_entry"),
                 relief="solid", borderwidth=1, bg="#FFFFFF", fg="#000000",
             )
-            # При русской раскладке Ctrl+клавиша приходит управляющим символом
-            # (\x01, \x03, \x16 ...), а не keysym латинской буквы, поэтому
-            # штатные привязки Tk <Control-a>, <Control-v> в этом случае
-            # не срабатывают. Обрабатываем управляющие символы вручную.
             entry.bind("<Control-KeyPress>", self._on_entry_hotkey)
             entry.place(x=entry_x, y=row_y + (btn_h - entry_h) // 2,
                         width=entry_w, height=entry_h)
@@ -351,7 +330,6 @@ class LaunchApp(tk.Tk):
             width=self.px(self.s["window_width"] - self.s["margin_left"] - self.s["margin_right"]),
             anchor="sw")
 
-    # -- действия ----------------------------------------------------------
 
     @staticmethod
     def _on_entry_hotkey(event):
@@ -365,20 +343,20 @@ class LaunchApp(tk.Tk):
         widget = event.widget
         char = event.char
 
-        if char == "\x01":          # Ctrl+A — выделить всё
+        if char == "\x01":
             widget.select_range(0, "end")
             widget.icursor("end")
             return "break"
 
-        if char == "\x03":          # Ctrl+C — копировать
+        if char == "\x03":
             LaunchApp._clipboard(widget, copy=True)
             return "break"
 
-        if char == "\x18":          # Ctrl+X — вырезать
+        if char == "\x18":
             LaunchApp._clipboard(widget, cut=True)
             return "break"
 
-        if char == "\x16":          # Ctrl+V — вставить путь
+        if char == "\x16":
             LaunchApp._paste(widget)
             return "break"
 
@@ -412,7 +390,6 @@ class LaunchApp(tk.Tk):
             text = widget.clipboard_get()
         except tk.TclError:
             return "break"
-        # Clipboard может содержать список строк (файлы из проводника).
         text = str(text).replace("\r", "").replace("\n", "").strip()
         if text.startswith("file:///"):
             text = text[len("file:///"):]
@@ -479,7 +456,7 @@ class LaunchApp(tk.Tk):
             return
 
         try:
-            os.startfile(path)  # .exe и .txt — через ассоциации Windows
+            os.startfile(path)
             self.paint(index, True)
             self.set_status("Кнопка «%s»: запущено — %s"
                             % (self.buttons[index].cget("text"), path), COLOR_STATUS_OK)
@@ -500,7 +477,6 @@ class LaunchApp(tk.Tk):
                                COLOR_STATUS_FAIL)
                 self.save()
 
-    # -- сохранение --------------------------------------------------------
 
     def collect(self):
         cfg = {"settings": dict(self.s), "buttons": []}
@@ -519,7 +495,6 @@ class LaunchApp(tk.Tk):
             return True
         except OSError as exc:
             if not self.used_fallback or force:
-                # Папка программы оказалась недоступна — переезжаем в %APPDATA%.
                 fb = os.path.join(fallback_dir(), CONFIG_NAME)
                 try:
                     save_config(fb, cfg)

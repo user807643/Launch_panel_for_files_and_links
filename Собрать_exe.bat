@@ -1,56 +1,50 @@
 @echo off
-chcp 65001 >nul
+chcp 866 >nul
 setlocal
 
-rem ============================================================
-rem  Сборка портативной программы «Запуск программ» в один .exe
-rem ============================================================
-
-rem Интерпретатор с tkinter. Встроенный Python AutoClaw не подходит:
-rem в нём нет tkinter. Если ваш Python в другом месте - поправьте путь.
 set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
 
 if not exist "%PY%" (
-    echo [ОШИБКА] Не найден Python: %PY%
-    echo Укажите правильный путь в переменной PY в этом файле.
+    echo [������] �� ������ Python: %PY%
+    echo ������ �ࠢ���� ���� � ��६����� PY � �⮬ 䠩��.
     pause
     exit /b 1
 )
 
-echo [1/3] Проверка tkinter...
+echo [1/3] �஢�ઠ tkinter...
 "%PY%" -c "import tkinter" 2>nul
 if errorlevel 1 (
-    echo [ОШИБКА] В этом Python нет tkinter, собрать программу нельзя.
+    echo [������] � �⮬ Python ��� tkinter, ᮡ��� �ணࠬ�� �����.
     pause
     exit /b 1
 )
 
-echo [2/3] Проверка PyInstaller...
+echo [2/3] �஢�ઠ PyInstaller...
 "%PY%" -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
-    echo PyInstaller не найден, устанавливаю...
+    echo PyInstaller �� ������, ��⠭�������...
     "%PY%" -m pip install pyinstaller
     if errorlevel 1 (
-        echo [ОШИБКА] Не удалось установить PyInstaller.
+        echo [������] �� 㤠���� ��⠭����� PyInstaller.
         pause
         exit /b 1
     )
 )
 
-echo [3/3] Сборка ЗапускПрограмм.exe...
+echo [3/3] ���ઠ ����᪏ணࠬ�.exe...
 "%PY%" -m PyInstaller --noconfirm --clean --onefile --noconsole ^
-    --name "ЗапускПрограмм" ^
+    --name "����᪏ணࠬ�" ^
     --distpath "dist" --workpath "build" --specpath "build" ^
-    "ЗапускПрограмм.py"
+    "����᪏ணࠬ�.py"
 
 if errorlevel 1 (
-    echo [ОШИБКА] Сборка не удалась.
+    echo [������] ���ઠ �� 㤠����.
     pause
     exit /b 1
 )
 
 echo.
-echo Готово: dist\ЗапускПрограмм.exe
-echo Рядом с .exe программа создаст settings.json со списком кнопок.
+echo ��⮢�: dist\����᪏ணࠬ�.exe
+echo �冷� � .exe �ணࠬ�� ᮧ���� settings.json � ᯨ᪮� ������.
 echo.
 pause
