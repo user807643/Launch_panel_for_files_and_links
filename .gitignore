@@ -23,6 +23,8 @@ env/
 # Temporary files
 *.tmp
 *.bak
+test*
+тест*
 
 # OS files
 Thumbs.db
