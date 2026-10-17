@@ -1,14 +1,3 @@
-"""
-«Запуск панели» — портативная программа быстрого запуска файлов.
-
-По нажатию кнопки запускается файл, путь к которому указан в поле справа
-от кнопки. Кнопка зелёная при успешном запуске и красная при неудаче.
-
-Портативность: настройки и пути хранятся в settings.json рядом с программой.
-Если папка программы недоступна для записи (например, Program Files),
-происходит автоматический откат в %APPDATA%\\Запуск панели.
-"""
-
 import json
 import os
 import subprocess
@@ -60,11 +49,6 @@ DEFAULTS = {
 
 
 def app_dir():
-    """Папка программы.
-
-    При сборке в один .exe (--onefile) распаковка идёт во временную папку,
-    поэтому sys.argv[0] указывает не туда. Правильный путь — sys.executable.
-    """
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -76,7 +60,6 @@ def fallback_dir():
 
 
 def can_write_dir(path):
-    """Проверяет, можно ли реально писать в папку."""
     probe = os.path.join(path, ".write_test.tmp")
     try:
         os.makedirs(path, exist_ok=True)
@@ -94,7 +77,6 @@ def can_write_dir(path):
 
 
 def resolve_config_path():
-    """Возвращает (путь к конфигу, признак отката в %APPDATA%)."""
     primary = os.path.join(app_dir(), CONFIG_NAME)
     if os.path.exists(primary) or can_write_dir(app_dir()):
         return primary, False
@@ -107,7 +89,6 @@ def resolve_config_path():
 
 
 def merge_config(data):
-    """Дополняет загруженный конфиг значениями по умолчанию."""
     cfg = {"settings": dict(DEFAULTS["settings"]), "buttons": []}
     if isinstance(data, dict):
         loaded = data.get("settings")
@@ -131,7 +112,6 @@ def merge_config(data):
 
 
 def load_config(path):
-    """Читает конфиг. Повреждённый файл не удаляет, а откладывает как .bak."""
     note = ""
     if os.path.exists(path):
         try:
@@ -148,10 +128,6 @@ def load_config(path):
 
 
 def save_config(path, cfg):
-    """Атомарная запись: сначала временный файл, затем подмена.
-
-    Так обрыв записи (выключение питания, блокировка файла) не испортит конфиг.
-    """
     folder = os.path.dirname(path) or "."
     os.makedirs(folder, exist_ok=True)
     tmp = os.path.join(folder, CONFIG_NAME + ".tmp")
@@ -164,7 +140,6 @@ def save_config(path, cfg):
 
 
 def dpi_scale():
-    """Множитель масштаба, чтобы окно не было размытым на мониторах 125–200%."""
     try:
         import ctypes
         try:
@@ -219,7 +194,6 @@ class LaunchApp(tk.Tk):
         return int(round(float(value) * self.scale))
 
     def font(self, key):
-        """Отрицательный размер задаёт высоту в пикселях — предсказуемо при DPI."""
         return (self.s["font_family"], -self.px(self.s[key]))
 
 
@@ -333,13 +307,6 @@ class LaunchApp(tk.Tk):
 
     @staticmethod
     def _on_entry_hotkey(event):
-        """Горячие клавиши в поле пути для любой раскладки, включая русскую.
-
-        Windows передаёт Ctrl+буква управляющим символом по позиции латинской
-        буквы: A -> \x01, C -> \x03, V -> \x16, X -> \x18, Z -> \x1a.
-        Так это работает и при английской, и при русской раскладке, поэтому
-        обрабатываем именно символы.
-        """
         widget = event.widget
         char = event.char
 
@@ -364,7 +331,6 @@ class LaunchApp(tk.Tk):
 
     @staticmethod
     def _selection(widget):
-        """Возвращает (начало, конец) выделения или None, если его нет."""
         try:
             return widget.index("sel.first"), widget.index("sel.last")
         except tk.TclError:
@@ -383,9 +349,6 @@ class LaunchApp(tk.Tk):
 
     @staticmethod
     def _paste(widget):
-        """Вставка пути из буфера. Кавычки и переводы строк убираются сразу:
-        «Копировать как путь» в Windows добавляет кавычки, а копирование
-        из проводника — перевод строки в конце."""
         try:
             text = widget.clipboard_get()
         except tk.TclError:
@@ -435,7 +398,6 @@ class LaunchApp(tk.Tk):
             self.save()
 
     def _clean_path(self, raw):
-        """Убирает кавычки: «Копировать как путь» в Windows добавляет их."""
         return raw.strip().strip('"').strip("'").strip()
 
     def launch(self, index):
