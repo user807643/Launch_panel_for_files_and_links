@@ -1,8 +1,6 @@
 name: Сборка Windows .exe
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
