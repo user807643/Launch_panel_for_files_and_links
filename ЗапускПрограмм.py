@@ -3,10 +3,13 @@ import os
 import subprocess
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog
+
 
 APP_TITLE = "Запуск панели"
 CONFIG_NAME = "settings.json"
+
 
 COLOR_OK = "#3CB371"
 COLOR_FAIL = "#E53935"
@@ -16,10 +19,19 @@ COLOR_STATUS_OK = "#1B7F4B"
 COLOR_STATUS_FAIL = "#C62828"
 COLOR_STATUS_NEUTRAL = "#444444"
 
+FILE_EXTENSIONS = {
+    "exe", "bat", "cmd", "lnk", "msi", "dll", "txt", "pdf", "doc", "docx",
+    "xls", "xlsx", "ppt", "pptx", "md", "py", "json", "ini", "log", "zip",
+    "rar", "7z", "jpg", "jpeg", "png", "bmp", "gif", "mp3", "mp4", "avi",
+}
+
+
 DEFAULTS = {
     "settings": {
         "title": "Запуск панели",
         "window_width": 950,
+        "window_height": 0,
+        "window_maximized": False,
         "button_width": 302,
         "button_height": 115,
         "row_pitch": 125,
@@ -45,7 +57,6 @@ DEFAULTS = {
         {"text": "кнопка 2", "label": "ред. 2", "path": ""},
     ],
 }
-
 
 
 def app_dir():
@@ -99,11 +110,16 @@ def merge_config(data):
         if isinstance(buttons, list):
             for item in buttons:
                 if isinstance(item, dict):
-                    cfg["buttons"].append({
+                    button = {
                         "text": str(item.get("text", "")),
                         "label": str(item.get("label", "")),
                         "path": str(item.get("path", "")),
-                    })
+                    }
+                    for key in ("x", "y"):
+                        value = item.get(key)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            button[key] = float(value)
+                    cfg["buttons"].append(button)
                 elif isinstance(item, str):
                     cfg["buttons"].append({"text": item, "label": "", "path": ""})
     if not cfg["buttons"]:
@@ -138,7 +154,6 @@ def save_config(path, cfg):
     os.replace(tmp, path)
 
 
-
 def dpi_scale():
     try:
         import ctypes
@@ -156,9 +171,7 @@ def dpi_scale():
     return 1.0
 
 
-
 class LaunchApp(tk.Tk):
-
     def __init__(self):
         super().__init__()
 
@@ -171,10 +184,25 @@ class LaunchApp(tk.Tk):
         self.path_vars = []
         self.status_text = tk.StringVar(value="")
 
+        self.menu = None
+        self.editor = None
+        self.edit_index = None
+        self.edit_mode = None
+        self.hint = None
+        self.hint_job = None
+
+        self.positions = []
+        self.drag = None
+        self.move_index = None
+        self.fullscreen = False
+        self.normal_size = None
+
         self._build_window()
-        self._build_header()
         self._build_rows()
         self._build_status()
+        self._bind_drag()
+        self._bind_window()
+        self._restore_maximized()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -185,10 +213,14 @@ class LaunchApp(tk.Tk):
                 "Папка программы недоступна для записи — настройки сохраняются в %APPDATA%.",
                 COLOR_STATUS_NEUTRAL,
             )
+        else:
+            self.set_status(
+                "Колесо — перемещение кнопки, F11 — весь экран, правый клик — путь или ссылка, запуск.",
+                COLOR_STATUS_NEUTRAL,
+            )
 
         if not os.path.exists(self.config_path):
             self.save()
-
 
     def px(self, value):
         return int(round(float(value) * self.scale))
@@ -196,35 +228,93 @@ class LaunchApp(tk.Tk):
     def font(self, key):
         return (self.s["font_family"], -self.px(self.s[key]))
 
-
     def _build_window(self):
         self.title(self.s["title"] or APP_TITLE)
         self.configure(bg=COLOR_BG)
-        self.resizable(False, False)
+        self.resizable(True, True)
+        rows = len(self.cfg["buttons"])
+        height = self.px(self.s.get("window_height") or 0) or self._window_height(rows)
+        self.geometry("%dx%d" % (self.px(self.s["window_width"]), height))
+        self.minsize(self.px(360), self.px(260))
+        self.normal_size = (self.px(self.s["window_width"]), height)
+
+    def _bind_window(self):
+        self.bind("<Configure>", self._on_configure)
+        self.bind("<F11>", self.toggle_fullscreen)
+        self.bind("<Escape>", self._on_escape)
+
+    def _restore_maximized(self):
+        if not self.s.get("window_maximized"):
+            return
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            pass
+
+    def _on_configure(self, event):
+        if event.widget is not self:
+            return
+        if self.winfo_width() <= 1 or not self.positions:
+            return
+        self._clamp_all()
+        self._fit_status()
+        if not self.fullscreen and self.state() == "normal":
+            self.normal_size = (event.width, event.height)
+
+    def _fit_status(self):
+        label = getattr(self, "status_label", None)
+        if label is None:
+            return
+        width = (self.winfo_width() - self.px(self.s["margin_left"])
+                 - self.px(self.s["margin_right"]))
+        label.place_configure(width=max(1, width))
+
+    def _clamp_all(self):
+        for index, button in enumerate(self.buttons):
+            x, y = self.positions[index]
+            cx, cy = self._clamp_position(button, x, y)
+            if (cx, cy) != (x, y):
+                button.place_configure(x=cx, y=cy)
+                self.positions[index] = [cx, cy]
+
+    def toggle_fullscreen(self, event=None):
+        self.fullscreen = not self.fullscreen
+        try:
+            self.attributes("-fullscreen", self.fullscreen)
+        except tk.TclError:
+            self.fullscreen = False
+            return "break"
+        if self.fullscreen:
+            self.set_status("Полный экран: F11 или Esc — вернуться в окно.",
+                            COLOR_STATUS_NEUTRAL)
+        else:
+            self.set_status("Обычное окно: F11 — во весь экран.", COLOR_STATUS_NEUTRAL)
+        return "break"
+
+    def _on_escape(self, event=None):
+        if self.fullscreen:
+            self.toggle_fullscreen()
+            return "break"
+        return None
+
+    def _remember_window(self):
+        if self.fullscreen:
+            return
+        try:
+            state = self.state()
+        except tk.TclError:
+            return
+        size = (self.winfo_width(), self.winfo_height())
+        if state != "normal" and self.normal_size:
+            size = self.normal_size
+        if size[0] > 1 and size[1] > 1:
+            self.s["window_width"] = int(round(size[0] / self.scale))
+            self.s["window_height"] = int(round(size[1] / self.scale))
+        self.s["window_maximized"] = (state == "zoomed")
 
     def _window_height(self, rows):
         needed = self.s["first_row_y"] + rows * self.s["row_pitch"] + self.s["bottom_space"]
         return self.px(max(self.s["min_height"], needed))
-
-    def _build_header(self):
-        rows = len(self.cfg["buttons"])
-        self.geometry("%dx%d" % (self.px(self.s["window_width"]), self._window_height(rows)))
-        tk.Label(
-            self,
-            text=self.s["title"] or APP_TITLE,
-            font=self.font("font_title"),
-            bg=COLOR_BG,
-            fg="#000000",
-        ).place(relx=0.5, y=self.px(30), anchor="n")
-
-    def _entry_x(self):
-        return (self.s["margin_left"] + self.s["button_width"]
-                + self.s["gap_button_label"] + self.s["label_width"]
-                + self.s["gap_label_entry"])
-
-    def _entry_width(self):
-        return (self.s["window_width"] - self._entry_x()
-                - self.s["margin_right"] - self.s["browse_width"] - self.s["browse_gap"])
 
     def _build_rows(self):
         btn_w = self.px(self.s["button_width"])
@@ -232,17 +322,13 @@ class LaunchApp(tk.Tk):
         pitch = self.px(self.s["row_pitch"])
         first_y = self.px(self.s["first_row_y"])
         left = self.px(self.s["margin_left"])
-        label_w = self.px(self.s["label_width"])
-        label_x = self.px(self.s["margin_left"] + self.s["button_width"] + self.s["gap_button_label"])
-        entry_x = self.px(self._entry_x())
-        entry_w = self.px(self._entry_width())
-        browse_w = self.px(self.s["browse_width"])
-        browse_x = entry_x + entry_w + self.px(self.s["browse_gap"])
-        entry_h = self.px(34)
-        browse_h = self.px(32)
 
         for index, spec in enumerate(self.cfg["buttons"]):
-            row_y = first_y + index * pitch
+            saved = self._saved_position(spec)
+            if saved is None:
+                x, y = left, first_y + index * pitch
+            else:
+                x, y = self.px(saved[0]), self.px(saved[1])
 
             button = tk.Button(
                 self,
@@ -256,43 +342,19 @@ class LaunchApp(tk.Tk):
                 borderwidth=0,
                 highlightthickness=0,
                 cursor="hand2",
+                wraplength=btn_w - self.px(24),
+                justify="center",
                 command=lambda i=index: self.launch(i),
             )
-            button.place(x=left, y=row_y, width=btn_w, height=btn_h)
-
-            canvas = tk.Canvas(
-                self, width=label_w, height=btn_h,
-                bg=COLOR_BG, highlightthickness=0, bd=0,
-            )
-            canvas.place(x=label_x, y=row_y)
-            canvas.create_text(
-                label_w / 2, btn_h / 2,
-                text=spec.get("label") or ("ред. %d" % (index + 1)),
-                angle=90,
-                font=self.font("font_label"),
-                fill="#000000",
-            )
-
-            var = tk.StringVar(value=spec.get("path", ""))
-            entry = tk.Entry(
-                self, textvariable=var, font=self.font("font_entry"),
-                relief="solid", borderwidth=1, bg="#FFFFFF", fg="#000000",
-            )
-            entry.bind("<Control-KeyPress>", self._on_entry_hotkey)
-            entry.place(x=entry_x, y=row_y + (btn_h - entry_h) // 2,
-                        width=entry_w, height=entry_h)
-
-            browse = tk.Button(
-                self, text="…", font=self.font("font_entry"),
-                bg="#E8E8E8", fg="#000000", relief="flat", borderwidth=0,
-                highlightthickness=0, cursor="hand2",
-                command=lambda i=index: self.choose_file(i),
-            )
-            browse.place(x=browse_x, y=row_y + (btn_h - browse_h) // 2,
-                         width=browse_w, height=browse_h)
+            button.place(x=x, y=y, width=btn_w, height=btn_h)
+            button.bind("<Button-3>", lambda event, i=index: self.popup_menu(event, i))
+            button.bind("<Button-2>", lambda event, i=index: self.begin_drag(event, i))
+            button.bind("<Enter>", lambda event, i=index: self.schedule_hint(i))
+            button.bind("<Leave>", lambda event: self.hide_hint())
 
             self.buttons.append(button)
-            self.path_vars.append(var)
+            self.positions.append([x, y])
+            self.path_vars.append(tk.StringVar(value=spec.get("path", "")))
 
     def _build_status(self):
         self.status_label = tk.Label(
@@ -304,6 +366,212 @@ class LaunchApp(tk.Tk):
             width=self.px(self.s["window_width"] - self.s["margin_left"] - self.s["margin_right"]),
             anchor="sw")
 
+    def _menu(self):
+        if self.menu is None:
+            self.menu = tk.Menu(
+                self, tearoff=0, font=self.font("font_entry"),
+                bg="#FFFFFF", fg="#000000", activebackground=COLOR_OK,
+                activeforeground="#FFFFFF", bd=1,
+            )
+        return self.menu
+
+    def caption(self, index):
+        return self.buttons[index].cget("text")
+
+    def popup_menu(self, event, index):
+        self.hide_hint()
+        self.exit_move_mode()
+        self.finish_edit(commit=True)
+        menu = self._menu()
+        self.fill_menu(menu, index)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def fill_menu(self, menu, index):
+        menu.delete(0, "end")
+        menu.add_command(label=self.caption(index), state="disabled")
+        menu.add_separator()
+        menu.add_command(label="Изменить путь…", command=lambda: self.edit_path(index))
+        menu.add_command(label="Обзор файла…", command=lambda: self.choose_file(index))
+        menu.add_command(label="Переименовать…", command=lambda: self.edit_name(index))
+        menu.add_command(label="Переместить", command=lambda: self.enter_move_mode(index))
+        menu.add_separator()
+        menu.add_command(label="Скопировать путь", command=lambda: self.copy_path(index))
+        menu.add_command(label="Очистить путь", command=lambda: self.clear_path(index))
+        menu.add_separator()
+        menu.add_command(label="Запустить", command=lambda: self.launch(index))
+
+    def edit_path(self, index):
+        self.begin_edit(index, "path", self.path_vars[index].get())
+
+    def edit_name(self, index):
+        self.begin_edit(index, "name", self.caption(index))
+
+    def begin_edit(self, index, mode, initial):
+        self.finish_edit(commit=True)
+        button = self.buttons[index]
+        info = button.place_info()
+        x = int(float(info.get("x") or 0))
+        y = int(float(info.get("y") or 0))
+        width = int(float(info.get("width") or 0)) or button.winfo_width()
+        height = int(float(info.get("height") or 0)) or button.winfo_height()
+
+        editor = tk.Entry(
+            self,
+            font=self.font("font_button" if mode == "name" else "font_entry"),
+            bg="#FFFFFF", fg="#000000",
+            relief="flat", borderwidth=0,
+            highlightthickness=max(1, self.px(3)),
+            highlightbackground=COLOR_OK, highlightcolor=COLOR_OK,
+            insertwidth=max(1, self.px(1)),
+            justify="center" if mode == "name" else "left",
+        )
+        editor.place(x=x, y=y, width=width, height=height)
+        if initial:
+            editor.insert(0, initial)
+        editor.bind("<Return>", self._commit_edit_event)
+        editor.bind("<KP_Enter>", self._commit_edit_event)
+        editor.bind("<Escape>", self._cancel_edit_event)
+        editor.bind("<FocusOut>", self._commit_edit_event)
+        editor.bind("<Control-KeyPress>", self._on_entry_hotkey)
+        editor.bind("<Button-3>", lambda event, i=index: self._editor_menu(event, i))
+
+        self.update_idletasks()
+        editor.focus_set()
+        editor.select_range(0, "end")
+        editor.icursor("end")
+        if mode == "path":
+            self.after_idle(lambda: self._reveal_tail(editor))
+
+        self.editor = editor
+        self.edit_index = index
+        self.edit_mode = mode
+        if mode == "path":
+            self.set_status(
+                "Кнопка «%s»: впишите путь или ссылку, Enter — сохранить, Esc — отмена."
+                % self.caption(index), COLOR_STATUS_NEUTRAL)
+        else:
+            self.set_status(
+                "Кнопка «%s»: впишите новое имя, Enter — сохранить, Esc — отмена."
+                % self.caption(index), COLOR_STATUS_NEUTRAL)
+
+    def _editor_menu(self, event, index):
+        self.popup_menu(event, index)
+        return "break"
+
+    def _reveal_tail(self, editor):
+        if editor is not self.editor:
+            return
+        try:
+            editor.icursor("end")
+            editor.xview_moveto(1.0)
+        except tk.TclError:
+            pass
+
+    def finish_edit(self, commit=True):
+        editor = self.editor
+        if editor is None:
+            return False
+        index = self.edit_index
+        mode = self.edit_mode
+        raw = editor.get()
+
+        self.editor = None
+        self.edit_index = None
+        self.edit_mode = None
+        try:
+            editor.destroy()
+        except tk.TclError:
+            pass
+
+        if not commit:
+            self.set_status("Правка отменена.", COLOR_STATUS_NEUTRAL)
+            return False
+
+        if mode == "path":
+            value = self._clean_path(raw)
+            self.path_vars[index].set(value)
+            if value:
+                self.set_status("Кнопка «%s»: путь или ссылка — %s"
+                                % (self.caption(index), value), COLOR_STATUS_NEUTRAL)
+            else:
+                self.set_status("Кнопка «%s»: путь или ссылка пусты."
+                                % self.caption(index), COLOR_STATUS_NEUTRAL)
+        else:
+            value = " ".join(raw.split())
+            if not value:
+                value = "кнопка %d" % (index + 1)
+            self.cfg["buttons"][index]["text"] = value
+            self.buttons[index].configure(text=value)
+            self.set_status("Кнопка переименована: «%s»" % value, COLOR_STATUS_NEUTRAL)
+        self.save()
+        return True
+
+    def _commit_edit_event(self, event=None):
+        self.finish_edit(commit=True)
+        return "break"
+
+    def _cancel_edit_event(self, event=None):
+        self.finish_edit(commit=False)
+        return "break"
+
+    def copy_path(self, index):
+        value = self.path_vars[index].get().strip()
+        if not value:
+            self.set_status("Кнопка «%s»: путь пуст — копировать нечего."
+                            % self.caption(index), COLOR_STATUS_FAIL)
+            return
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.set_status("Путь скопирован: %s" % value, COLOR_STATUS_NEUTRAL)
+
+    def clear_path(self, index):
+        self.path_vars[index].set("")
+        self.set_status("Кнопка «%s»: путь очищен."
+                        % self.caption(index), COLOR_STATUS_NEUTRAL)
+        self.save()
+
+    def schedule_hint(self, index):
+        self.hide_hint()
+        self.hint_job = self.after(450, lambda: self.show_hint(index))
+
+    def show_hint(self, index):
+        self.hint_job = None
+        if self.editor is not None:
+            return
+        path = self.path_vars[index].get().strip()
+        text = path if path else "Путь или ссылка не заданы — правый клик по кнопке"
+        tip = tk.Toplevel(self)
+        tip.wm_overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tk.Label(
+            tip, text=text, font=self.font("font_status"),
+            bg="#FFFFE1", fg="#000000", relief="solid", borderwidth=1,
+            padx=self.px(6), pady=self.px(4), justify="left",
+            wraplength=self.px(360),
+        ).pack()
+        button = self.buttons[index]
+        tip.wm_geometry("+%d+%d" % (
+            button.winfo_rootx() + button.winfo_width() + self.px(12),
+            button.winfo_rooty() + button.winfo_height() // 2 - self.px(14),
+        ))
+        self.hint = tip
+
+    def hide_hint(self):
+        if self.hint_job is not None:
+            self.after_cancel(self.hint_job)
+            self.hint_job = None
+        if self.hint is not None:
+            try:
+                self.hint.destroy()
+            except tk.TclError:
+                pass
+            self.hint = None
 
     @staticmethod
     def _on_entry_hotkey(event):
@@ -401,56 +669,173 @@ class LaunchApp(tk.Tk):
         return raw.strip().strip('"').strip("'").strip()
 
     def launch(self, index):
-        path = self._clean_path(self.path_vars[index].get())
+        raw = self._clean_path(self.path_vars[index].get())
+        caption = self.buttons[index].cget("text")
 
-        if not path:
+        if not raw:
             self.paint(index, False)
-            self.set_status("Кнопка «%s»: путь не указан."
-                            % self.buttons[index].cget("text"), COLOR_STATUS_FAIL)
+            self.set_status("Кнопка «%s»: путь или ссылка не заданы." % caption,
+                            COLOR_STATUS_FAIL)
             self.save()
             return
 
-        if not os.path.exists(path):
-            self.paint(index, False)
-            self.set_status("Кнопка «%s»: файл не найден — %s"
-                            % (self.buttons[index].cget("text"), path), COLOR_STATUS_FAIL)
-            self.save()
+        if os.path.exists(raw):
+            self._run_file(index, raw)
             return
 
+        url = self._target_url(raw)
+        if url:
+            self._run_url(index, url)
+            return
+
+        self.paint(index, False)
+        self.set_status("Кнопка «%s»: файл не найден — %s" % (caption, raw),
+                        COLOR_STATUS_FAIL)
+        self.save()
+
+    def _run_file(self, index, path):
+        caption = self.buttons[index].cget("text")
         try:
             os.startfile(path)
-            self.paint(index, True)
-            self.set_status("Кнопка «%s»: запущено — %s"
-                            % (self.buttons[index].cget("text"), path), COLOR_STATUS_OK)
-            self.save()
-            return
-        except OSError as first_error:
+        except OSError:
             try:
                 subprocess.Popen([path], shell=False)
-                self.paint(index, True)
-                self.set_status("Кнопка «%s»: запущено — %s"
-                                % (self.buttons[index].cget("text"), path), COLOR_STATUS_OK)
-                self.save()
-                return
-            except Exception as second_error:
+            except Exception as exc:
                 self.paint(index, False)
                 self.set_status("Кнопка «%s»: запустить не удалось — %s (%s)"
-                                % (self.buttons[index].cget("text"), path, second_error),
-                               COLOR_STATUS_FAIL)
+                                % (caption, path, exc), COLOR_STATUS_FAIL)
                 self.save()
+                return
+        self.paint(index, True)
+        self.set_status("Кнопка «%s»: запущено — %s" % (caption, path), COLOR_STATUS_OK)
+        self.save()
 
+    def _run_url(self, index, url):
+        caption = self.buttons[index].cget("text")
+        try:
+            os.startfile(url)
+        except OSError:
+            try:
+                if not webbrowser.open(url, new=2):
+                    raise RuntimeError("система не открыла браузер")
+            except Exception as exc:
+                self.paint(index, False)
+                self.set_status("Кнопка «%s»: ссылку открыть не удалось — %s (%s)"
+                                % (caption, url, exc), COLOR_STATUS_FAIL)
+                self.save()
+                return
+        self.paint(index, True)
+        self.set_status("Кнопка «%s»: открыто в браузере — %s" % (caption, url),
+                        COLOR_STATUS_OK)
+        self.save()
+
+    @staticmethod
+    def _target_url(value):
+        low = value.lower()
+        if low.startswith(("http://", "https://")):
+            return value
+        if low.startswith("www."):
+            return "http://" + value
+        if " " in value or "\\" in value:
+            return None
+        host = low.split("/")[0]
+        if ":" in host or "." not in host:
+            return None
+        tail = host.rsplit(".", 1)[1]
+        if len(tail) < 2 or not tail.isalpha():
+            return None
+        if tail in FILE_EXTENSIONS:
+            return None
+        return "https://" + value
+
+    def _bind_drag(self):
+        self.bind("<B1-Motion>", self.drag_motion)
+        self.bind("<ButtonRelease-1>", self.end_drag)
+        self.bind("<B2-Motion>", self.drag_motion)
+        self.bind("<ButtonRelease-2>", self.end_drag)
+
+    @staticmethod
+    def _saved_position(spec):
+        try:
+            return float(spec["x"]), float(spec["y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def begin_drag(self, event, index):
+        self.hide_hint()
+        if self.editor is not None:
+            self.finish_edit(commit=True)
+        button = self.buttons[index]
+        self.drag = {
+            "index": index,
+            "dx": event.x_root - button.winfo_rootx(),
+            "dy": event.y_root - button.winfo_rooty(),
+        }
+        self.configure(cursor="fleur")
+        return "break"
+
+    def drag_motion(self, event):
+        if self.drag is None:
+            return
+        index = self.drag["index"]
+        button = self.buttons[index]
+        x = event.x_root - self.drag["dx"] - self.winfo_rootx()
+        y = event.y_root - self.drag["dy"] - self.winfo_rooty()
+        x, y = self._clamp_position(button, x, y)
+        button.place_configure(x=x, y=y)
+        self.positions[index] = [x, y]
+
+    def end_drag(self, event=None):
+        if self.drag is None:
+            return
+        index = self.drag["index"]
+        self.drag = None
+        self.configure(cursor="")
+        self.exit_move_mode()
+        self.set_status("Кнопка «%s» перемещена." % self.caption(index),
+                        COLOR_STATUS_NEUTRAL)
+        self.save()
+
+    def _clamp_position(self, button, x, y):
+        max_x = max(0, self.winfo_width() - button.winfo_width())
+        max_y = max(0, self.winfo_height() - button.winfo_height())
+        return int(max(0, min(x, max_x))), int(max(0, min(y, max_y)))
+
+    def enter_move_mode(self, index):
+        self.exit_move_mode()
+        self.finish_edit(commit=True)
+        self.hide_hint()
+        self.move_index = index
+        button = self.buttons[index]
+        button.configure(cursor="fleur", command=lambda: None)
+        button.bind("<Button-1>", lambda event, i=index: self.begin_drag(event, i))
+        self.set_status("Кнопка «%s»: тяните её мышью, чтобы переместить."
+                        % self.caption(index), COLOR_STATUS_NEUTRAL)
+
+    def exit_move_mode(self):
+        index = self.move_index
+        if index is None:
+            return
+        self.move_index = None
+        button = self.buttons[index]
+        button.unbind("<Button-1>")
+        button.configure(cursor="hand2", command=lambda i=index: self.launch(i))
 
     def collect(self):
         cfg = {"settings": dict(self.s), "buttons": []}
         for index, spec in enumerate(self.cfg["buttons"]):
+            x, y = self.positions[index]
             cfg["buttons"].append({
                 "text": spec.get("text") or ("кнопка %d" % (index + 1)),
                 "label": spec.get("label") or ("ред. %d" % (index + 1)),
                 "path": self.path_vars[index].get().strip(),
+                "x": int(round(x / self.scale)),
+                "y": int(round(y / self.scale)),
             })
         return cfg
 
     def save(self, force=False):
+        self._remember_window()
         cfg = self.collect()
         try:
             save_config(self.config_path, cfg)
@@ -471,6 +856,7 @@ class LaunchApp(tk.Tk):
             return False
 
     def on_close(self):
+        self.hide_hint()
         self.save(force=True)
         self.destroy()
 
