@@ -1,10 +1,12 @@
 import json
+import math
 import os
 import subprocess
 import sys
 import tkinter as tk
 import webbrowser
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+from tkinter import font as tkfont
 
 
 APP_TITLE = "Запуск панели"
@@ -19,6 +21,15 @@ COLOR_STATUS_OK = "#1B7F4B"
 COLOR_STATUS_FAIL = "#C62828"
 COLOR_STATUS_NEUTRAL = "#444444"
 
+SHAPE_DEFAULT = "rectangle"
+SHAPE_ORDER = ("circle", "square", "rectangle", "star")
+SHAPE_TITLES = {
+    "circle": "Круг",
+    "square": "Квадрат",
+    "rectangle": "Прямоугольник",
+    "star": "Звезда",
+}
+
 FILE_EXTENSIONS = {
     "exe", "bat", "cmd", "lnk", "msi", "dll", "txt", "pdf", "doc", "docx",
     "xls", "xlsx", "ppt", "pptx", "md", "py", "json", "ini", "log", "zip",
@@ -32,10 +43,10 @@ DEFAULTS = {
         "window_width": 950,
         "window_height": 0,
         "window_maximized": False,
-        "button_width": 302,
-        "button_height": 115,
-        "row_pitch": 125,
-        "first_row_y": 200,
+        "button_width": 151,
+        "button_height": 58,
+        "row_pitch": 74,
+        "first_row_y": 120,
         "margin_left": 80,
         "gap_button_label": 8,
         "label_width": 40,
@@ -49,12 +60,12 @@ DEFAULTS = {
         "font_label": 17,
         "font_entry": 16,
         "font_status": 14,
-        "min_height": 529,
+        "min_height": 330,
         "bottom_space": 40,
     },
     "buttons": [
-        {"text": "кнопка 1", "label": "ред. 1", "path": ""},
-        {"text": "кнопка 2", "label": "ред. 2", "path": ""},
+        {"text": "кнопка 1", "label": "ред. 1", "path": "", "shape": SHAPE_DEFAULT},
+        {"text": "кнопка 2", "label": "ред. 2", "path": "", "shape": SHAPE_DEFAULT},
     ],
 }
 
@@ -101,6 +112,7 @@ def resolve_config_path():
 
 def merge_config(data):
     cfg = {"settings": dict(DEFAULTS["settings"]), "buttons": []}
+    has_buttons = False
     if isinstance(data, dict):
         loaded = data.get("settings")
         if isinstance(loaded, dict):
@@ -108,12 +120,15 @@ def merge_config(data):
                 cfg["settings"][key] = value
         buttons = data.get("buttons")
         if isinstance(buttons, list):
+            has_buttons = True
             for item in buttons:
                 if isinstance(item, dict):
+                    shape = item.get("shape")
                     button = {
                         "text": str(item.get("text", "")),
                         "label": str(item.get("label", "")),
                         "path": str(item.get("path", "")),
+                        "shape": shape if shape in SHAPE_TITLES else SHAPE_DEFAULT,
                     }
                     for key in ("x", "y"):
                         value = item.get(key)
@@ -121,8 +136,9 @@ def merge_config(data):
                             button[key] = float(value)
                     cfg["buttons"].append(button)
                 elif isinstance(item, str):
-                    cfg["buttons"].append({"text": item, "label": "", "path": ""})
-    if not cfg["buttons"]:
+                    cfg["buttons"].append({"text": item, "label": "", "path": "",
+                                           "shape": SHAPE_DEFAULT})
+    if not has_buttons:
         cfg["buttons"] = [dict(b) for b in DEFAULTS["buttons"]]
     return cfg
 
@@ -171,6 +187,236 @@ def dpi_scale():
     return 1.0
 
 
+class ShapeButton:
+    """Кнопка, нарисованная на общем холсте окна.
+
+    Отдельный холст на каждую кнопку оставлял вокруг фигуры непрозрачный белый
+    прямоугольник: при наложении он закрывал соседние кнопки. Поэтому все кнопки
+    рисуются на одном холсте — фигуры ложатся друг на друга без белых «окон».
+    """
+
+    MIN_FONT = 7
+    STAR_INNER = 0.60
+
+    def __init__(self, board, index, text="", shape=SHAPE_DEFAULT, font_family="Segoe UI",
+                 font_px=20, fill=COLOR_OK, text_color=COLOR_TEXT):
+        self.board = board
+        self.index = index
+        self.tag = "btn%d" % index
+        self.family = font_family
+        self.font_px = max(self.MIN_FONT, int(font_px))
+        self.fill = fill
+        self.text_color = text_color
+        self._text = text or ""
+        self._shape = shape if shape in SHAPE_TITLES else SHAPE_DEFAULT
+        self.x = 0.0
+        self.y = 0.0
+        self.width = 0.0
+        self.height = 0.0
+        self._fonts = {}
+
+    @property
+    def text(self):
+        return self._text
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def set_text(self, value):
+        value = value or ""
+        if value == self._text:
+            return
+        self._text = value
+        self.redraw()
+
+    def set_shape(self, shape):
+        if shape not in SHAPE_TITLES:
+            shape = SHAPE_DEFAULT
+        if shape == self._shape:
+            return
+        self._shape = shape
+        self.redraw()
+
+    def set_fill(self, color):
+        if color == self.fill:
+            return
+        self.fill = color
+        self.redraw()
+
+    def set_geometry(self, x, y, width, height):
+        self.x = float(x)
+        self.y = float(y)
+        self.width = float(width)
+        self.height = float(height)
+        self.redraw()
+
+    def move_to(self, x, y):
+        dx = x - self.x
+        dy = y - self.y
+        if not dx and not dy:
+            return
+        self.x = float(x)
+        self.y = float(y)
+        self.board.move(self.tag, dx, dy)
+
+    def redraw(self):
+        self.board.delete(self.tag)
+        if self.width <= 2 or self.height <= 2:
+            return
+        geometry = self._geometry(self.width, self.height)
+        ox, oy = self.x, self.y
+        tags = (self.tag, "button")
+        if geometry["kind"] == "rect":
+            x0, y0, x1, y1 = geometry["box"]
+            self.board.create_rectangle(x0 + ox, y0 + oy, x1 + ox, y1 + oy,
+                                        fill=self.fill, outline=self.fill,
+                                        width=1, tags=tags)
+        elif geometry["kind"] == "oval":
+            x0, y0, x1, y1 = geometry["box"]
+            self.board.create_oval(x0 + ox, y0 + oy, x1 + ox, y1 + oy,
+                                   fill=self.fill, outline=self.fill,
+                                   width=1, tags=tags)
+        else:
+            points = geometry["points"]
+            shifted = []
+            for step in range(0, len(points), 2):
+                shifted.extend((points[step] + ox, points[step + 1] + oy))
+            self.board.create_polygon(shifted, fill=self.fill, outline=self.fill,
+                                      width=1, tags=tags)
+        self._draw_caption(geometry)
+
+    def _geometry(self, width, height):
+        inset = 1.0
+        left, top = inset, inset
+        right, bottom = width - inset, height - inset
+        center = ((left + right) / 2.0, (top + bottom) / 2.0)
+        shape = self._shape
+
+        if shape == "rectangle":
+            return {
+                "kind": "rect",
+                "box": (left, top, right, bottom),
+                "center": center,
+                "text_w": (right - left) * 0.90,
+                "text_h": (bottom - top) * 0.86,
+            }
+
+        side = max(6.0, min(right - left, bottom - top))
+        half = side / 2.0
+        cx, cy = center
+
+        if shape == "square":
+            return {
+                "kind": "rect",
+                "box": (cx - half, cy - half, cx + half, cy + half),
+                "center": center,
+                "text_w": side * 0.74,
+                "text_h": side * 0.74,
+            }
+
+        if shape == "circle":
+            return {
+                "kind": "oval",
+                "box": (cx - half, cy - half, cx + half, cy + half),
+                "center": center,
+                "text_w": side * 0.68,
+                "text_h": side * 0.68,
+            }
+
+        return {
+            "kind": "star",
+            "points": self._star_points(cx, cy, half),
+            "center": center,
+            "text_w": side * 0.54,
+            "text_h": side * 0.34,
+            "single_line": True,
+        }
+
+    def _star_points(self, cx, cy, radius):
+        points = []
+        for step in range(10):
+            angle = math.radians(-90 + step * 36)
+            length = radius if step % 2 == 0 else radius * self.STAR_INNER
+            points.extend((cx + length * math.cos(angle), cy + length * math.sin(angle)))
+        return points
+
+    def _draw_caption(self, geometry):
+        text = " ".join(self._text.split())
+        if not text:
+            return
+        font, wrapped = self._fit_text(text, geometry["text_w"], geometry["text_h"],
+                                       geometry.get("single_line", False))
+        cx, cy = geometry["center"]
+        self.board.create_text(cx + self.x, cy + self.y, text=wrapped, font=font,
+                               fill=self.text_color, justify="center",
+                               anchor="center", tags=(self.tag, "caption"))
+
+    def _font(self, size):
+        font = self._fonts.get(size)
+        if font is None:
+            font = tkfont.Font(family=self.family, size=-size)
+            self._fonts[size] = font
+        return font
+
+    def _fit_text(self, text, box_w, box_h, single_line=False):
+        box_w = max(10.0, box_w)
+        box_h = max(10.0, box_h)
+        finders = (self._fit_single, self._fit_wrapped)
+        if not single_line:
+            finders = (self._fit_wrapped, self._fit_single)
+        for finder in finders:
+            found = finder(text, box_w, box_h)
+            if found is not None:
+                return found
+        font = self._font(self.MIN_FONT)
+        return font, "\n".join(self._wrap(text, font, box_w))
+
+    def _fit_single(self, text, box_w, box_h):
+        for size in range(self.font_px, self.MIN_FONT - 1, -1):
+            font = self._font(size)
+            if font.measure(text) <= box_w and font.metrics("linespace") <= box_h:
+                return font, text
+        return None
+
+    def _fit_wrapped(self, text, box_w, box_h):
+        for size in range(self.font_px, self.MIN_FONT - 1, -1):
+            font = self._font(size)
+            lines = self._wrap(text, font, box_w)
+            if len(lines) > 1 and len(lines) * font.metrics("linespace") <= box_h:
+                return font, "\n".join(lines)
+        return None
+
+    @staticmethod
+    def _wrap(text, font, max_width):
+        raw_lines = []
+        for paragraph in text.split("\n"):
+            words = paragraph.split()
+            if not words:
+                raw_lines.append("")
+                continue
+            current = words[0]
+            for word in words[1:]:
+                candidate = current + " " + word
+                if font.measure(candidate) <= max_width:
+                    current = candidate
+                else:
+                    raw_lines.append(current)
+                    current = word
+            raw_lines.append(current)
+
+        lines = []
+        for line in raw_lines:
+            while line and font.measure(line) > max_width and len(line) > 1:
+                cut = len(line)
+                while cut > 1 and font.measure(line[:cut]) > max_width:
+                    cut -= 1
+                lines.append(line[:cut])
+                line = line[cut:].lstrip()
+            lines.append(line)
+        return lines or [""]
+
+
 class LaunchApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -184,7 +430,16 @@ class LaunchApp(tk.Tk):
         self.path_vars = []
         self.status_text = tk.StringVar(value="")
 
+        self.board = None
+        self.board_size = None
+        self.tag_index = {}
+        self.hover_index = None
+
         self.menu = None
+        self.empty_menu = None
+        self.menu_point = None
+        self.shape_menu = None
+        self.shape_var = None
         self.editor = None
         self.edit_index = None
         self.edit_mode = None
@@ -203,6 +458,7 @@ class LaunchApp(tk.Tk):
         self._bind_drag()
         self._bind_window()
         self._restore_maximized()
+        self.after(250, self._clamp_all)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -215,7 +471,7 @@ class LaunchApp(tk.Tk):
             )
         else:
             self.set_status(
-                "Колесо — перемещение кнопки, F11 — весь экран, правый клик — путь или ссылка, запуск.",
+                "Колесо — перемещение, F11 — весь экран, правый клик — путь, форма, запуск.",
                 COLOR_STATUS_NEUTRAL,
             )
 
@@ -254,12 +510,20 @@ class LaunchApp(tk.Tk):
     def _on_configure(self, event):
         if event.widget is not self:
             return
-        if self.winfo_width() <= 1 or not self.positions:
+        if self.winfo_width() <= 1:
             return
-        self._clamp_all()
         self._fit_status()
         if not self.fullscreen and self.state() == "normal":
             self.normal_size = (event.width, event.height)
+
+    def _on_board_configure(self, event):
+        size = (event.width, event.height)
+        if self.board_size is None:
+            self.board_size = size
+            return
+        if event.width < self.board_size[0] or event.height < self.board_size[1]:
+            self._clamp_all()
+        self.board_size = size
 
     def _fit_status(self):
         label = getattr(self, "status_label", None)
@@ -270,11 +534,13 @@ class LaunchApp(tk.Tk):
         label.place_configure(width=max(1, width))
 
     def _clamp_all(self):
+        if self.board is None or self.board.winfo_width() <= 2:
+            return
         for index, button in enumerate(self.buttons):
-            x, y = self.positions[index]
+            x, y = button.x, button.y
             cx, cy = self._clamp_position(button, x, y)
             if (cx, cy) != (x, y):
-                button.place_configure(x=cx, y=cy)
+                button.move_to(cx, cy)
                 self.positions[index] = [cx, cy]
 
     def toggle_fullscreen(self, event=None):
@@ -317,6 +583,19 @@ class LaunchApp(tk.Tk):
         return self.px(max(self.s["min_height"], needed))
 
     def _build_rows(self):
+        self.board = tk.Canvas(
+            self, bg=COLOR_BG, bd=0, highlightthickness=0, takefocus=0,
+        )
+        self.board.place(x=0, y=0, relwidth=1, relheight=1)
+        self.board.bind("<Button-1>", self._board_click)
+        self.board.bind("<Button-2>", self._board_middle)
+        self.board.bind("<Button-3>", self._board_menu)
+        self.board.bind("<Motion>", self._board_motion)
+        self.board.bind("<Leave>", self._board_leave)
+        self.board.bind("<Configure>", self._on_board_configure)
+        self._create_buttons()
+
+    def _create_buttons(self):
         btn_w = self.px(self.s["button_width"])
         btn_h = self.px(self.s["button_height"])
         pitch = self.px(self.s["row_pitch"])
@@ -330,31 +609,100 @@ class LaunchApp(tk.Tk):
             else:
                 x, y = self.px(saved[0]), self.px(saved[1])
 
-            button = tk.Button(
-                self,
+            button = ShapeButton(
+                self.board, index,
                 text=spec.get("text") or ("кнопка %d" % (index + 1)),
-                font=self.font("font_button"),
-                bg=COLOR_OK,
-                fg=COLOR_TEXT,
-                activebackground=COLOR_OK,
-                activeforeground=COLOR_TEXT,
-                relief="flat",
-                borderwidth=0,
-                highlightthickness=0,
-                cursor="hand2",
-                wraplength=btn_w - self.px(24),
-                justify="center",
-                command=lambda i=index: self.launch(i),
+                shape=spec.get("shape", SHAPE_DEFAULT),
+                font_family=self.s["font_family"],
+                font_px=self.px(self.s["font_button"]),
+                fill=COLOR_OK,
+                text_color=COLOR_TEXT,
             )
-            button.place(x=x, y=y, width=btn_w, height=btn_h)
-            button.bind("<Button-3>", lambda event, i=index: self.popup_menu(event, i))
-            button.bind("<Button-2>", lambda event, i=index: self.begin_drag(event, i))
-            button.bind("<Enter>", lambda event, i=index: self.schedule_hint(i))
-            button.bind("<Leave>", lambda event: self.hide_hint())
+            button.set_geometry(x, y, btn_w, btn_h)
 
             self.buttons.append(button)
             self.positions.append([x, y])
             self.path_vars.append(tk.StringVar(value=spec.get("path", "")))
+            self.tag_index[button.tag] = index
+
+    def _rebuild_buttons(self):
+        for button in self.buttons:
+            self.board.delete(button.tag)
+        self.buttons = []
+        self.path_vars = []
+        self.positions = []
+        self.tag_index = {}
+        self.hover_index = None
+        self.board.configure(cursor="")
+        self._create_buttons()
+
+    def _sync_from_widgets(self):
+        for index, spec in enumerate(self.cfg["buttons"]):
+            if index >= len(self.buttons):
+                break
+            spec["text"] = self.buttons[index].text
+            spec["path"] = self.path_vars[index].get().strip()
+            spec["shape"] = self.buttons[index].shape
+            spec["x"] = self.positions[index][0] / self.scale
+            spec["y"] = self.positions[index][1] / self.scale
+
+    def _button_at(self, x, y):
+        for item in reversed(self.board.find_overlapping(x, y, x, y)):
+            for tag in self.board.gettags(item):
+                index = self.tag_index.get(tag)
+                if index is not None:
+                    return index
+        return None
+
+    def _board_click(self, event):
+        index = self._button_at(event.x, event.y)
+        if index is None:
+            self.exit_move_mode()
+            return "break"
+        if self.move_index == index:
+            return self.begin_drag(event, index)
+        self.launch(index)
+        return "break"
+
+    def _board_middle(self, event):
+        index = self._button_at(event.x, event.y)
+        if index is None:
+            return "break"
+        return self.begin_drag(event, index)
+
+    def _board_menu(self, event):
+        x = event.x_root - self.board.winfo_rootx()
+        y = event.y_root - self.board.winfo_rooty()
+        index = self._button_at(x, y)
+        if index is None:
+            self.popup_empty_menu(event, x, y)
+            return "break"
+        self.popup_menu(event, index)
+        return "break"
+
+    def _board_motion(self, event):
+        if self.drag is not None:
+            return
+        index = self._button_at(event.x, event.y)
+        if index == self.hover_index:
+            return
+        self.hover_index = index
+        self.hide_hint()
+        if index is None:
+            self.board.configure(cursor="")
+            return
+        if self.move_index == index:
+            self.board.configure(cursor="fleur")
+        else:
+            self.board.configure(cursor="hand2")
+        if self.move_index is None:
+            self.schedule_hint(index)
+
+    def _board_leave(self, event=None):
+        self.hover_index = None
+        self.hide_hint()
+        if self.drag is None:
+            self.board.configure(cursor="")
 
     def _build_status(self):
         self.status_label = tk.Label(
@@ -365,6 +713,7 @@ class LaunchApp(tk.Tk):
             x=self.px(self.s["margin_left"]), rely=1.0, y=-self.px(10),
             width=self.px(self.s["window_width"] - self.s["margin_left"] - self.s["margin_right"]),
             anchor="sw")
+        self.status_label.bind("<Button-3>", self._board_menu)
 
     def _menu(self):
         if self.menu is None:
@@ -376,7 +725,7 @@ class LaunchApp(tk.Tk):
         return self.menu
 
     def caption(self, index):
-        return self.buttons[index].cget("text")
+        return self.buttons[index].text
 
     def popup_menu(self, event, index):
         self.hide_hint()
@@ -389,6 +738,108 @@ class LaunchApp(tk.Tk):
         finally:
             menu.grab_release()
 
+    def _empty_menu(self):
+        if self.empty_menu is None:
+            self.empty_menu = tk.Menu(
+                self, tearoff=0, font=self.font("font_entry"),
+                bg="#FFFFFF", fg="#000000", activebackground=COLOR_OK,
+                activeforeground="#FFFFFF", bd=1,
+            )
+        return self.empty_menu
+
+    def popup_empty_menu(self, event, x, y):
+        self.hide_hint()
+        self.exit_move_mode()
+        self.finish_edit(commit=True)
+        self.menu_point = (x, y)
+        menu = self._empty_menu()
+        menu.delete(0, "end")
+        menu.add_command(label="Добавить кнопку", command=self.add_button)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def add_button(self):
+        self._sync_from_widgets()
+        used = {button.text for button in self.buttons}
+        number = len(self.cfg["buttons"]) + 1
+        while ("кнопка %d" % number) in used:
+            number += 1
+        text = "кнопка %d" % number
+
+        width = self.px(self.s["button_width"])
+        height = self.px(self.s["button_height"])
+        if self.menu_point is None:
+            x = self.px(self.s["margin_left"])
+            y = self.px(self.s["first_row_y"]) + len(self.cfg["buttons"]) * self.px(self.s["row_pitch"])
+        else:
+            x = self.menu_point[0] - width // 2
+            y = self.menu_point[1] - height // 2
+        x = int(max(0, min(x, self.board.winfo_width() - width)))
+        y = int(max(0, min(y, self.board.winfo_height() - height)))
+
+        self.cfg["buttons"].append({
+            "text": text,
+            "label": "ред. %d" % number,
+            "path": "",
+            "shape": SHAPE_DEFAULT,
+            "x": x / self.scale,
+            "y": y / self.scale,
+        })
+        self._rebuild_buttons()
+        self.save()
+        self.set_status(
+            "Добавлена кнопка «%s»: правый клик по ней — путь, форма, запуск." % text,
+            COLOR_STATUS_NEUTRAL)
+
+    def remove_button(self, index):
+        if not 0 <= index < len(self.buttons):
+            return
+        caption = self.caption(index)
+        if not messagebox.askyesno(
+                APP_TITLE,
+                "Удалить кнопку «%s»?\nЕё путь и имя будут потеряны." % caption,
+                parent=self):
+            return
+        self.finish_edit(commit=True)
+        self.hide_hint()
+        self.exit_move_mode()
+        self._sync_from_widgets()
+        self.cfg["buttons"].pop(index)
+        self._rebuild_buttons()
+        self.save()
+        self.set_status(
+            "Кнопка «%s» удалена. Правый клик по пустому месту — «Добавить кнопку». "
+            % caption, COLOR_STATUS_NEUTRAL)
+
+    def _shape_menu(self):
+        if self.shape_menu is None:
+            self.shape_menu = tk.Menu(
+                self, tearoff=0, font=self.font("font_entry"),
+                bg="#FFFFFF", fg="#000000", activebackground=COLOR_OK,
+                activeforeground="#FFFFFF", bd=1,
+            )
+        return self.shape_menu
+
+    def fill_shape_menu(self, menu, index):
+        menu.delete(0, "end")
+        self.shape_var = tk.StringVar(value=self.buttons[index].shape)
+        for key in SHAPE_ORDER:
+            menu.add_radiobutton(
+                label=SHAPE_TITLES[key], variable=self.shape_var, value=key,
+                command=lambda k=key: self.set_shape(index, k))
+
+    def set_shape(self, index, shape):
+        if shape not in SHAPE_TITLES:
+            return
+        self.cfg["buttons"][index]["shape"] = shape
+        self.buttons[index].set_shape(shape)
+        self.set_status(
+            "Кнопка «%s»: форма — %s." % (self.caption(index), SHAPE_TITLES[shape].lower()),
+            COLOR_STATUS_NEUTRAL)
+        self.save()
+
     def fill_menu(self, menu, index):
         menu.delete(0, "end")
         menu.add_command(label=self.caption(index), state="disabled")
@@ -396,12 +847,19 @@ class LaunchApp(tk.Tk):
         menu.add_command(label="Изменить путь…", command=lambda: self.edit_path(index))
         menu.add_command(label="Обзор файла…", command=lambda: self.choose_file(index))
         menu.add_command(label="Переименовать…", command=lambda: self.edit_name(index))
+        shape_menu = self._shape_menu()
+        self.fill_shape_menu(shape_menu, index)
+        menu.add_cascade(label="Форма кнопки", menu=shape_menu)
         menu.add_command(label="Переместить", command=lambda: self.enter_move_mode(index))
         menu.add_separator()
         menu.add_command(label="Скопировать путь", command=lambda: self.copy_path(index))
         menu.add_command(label="Очистить путь", command=lambda: self.clear_path(index))
         menu.add_separator()
         menu.add_command(label="Запустить", command=lambda: self.launch(index))
+        menu.add_separator()
+        menu.add_command(label="Удалить кнопку", foreground=COLOR_STATUS_FAIL,
+                         activeforeground="#FFFFFF",
+                         command=lambda: self.remove_button(index))
 
     def edit_path(self, index):
         self.begin_edit(index, "path", self.path_vars[index].get())
@@ -412,11 +870,15 @@ class LaunchApp(tk.Tk):
     def begin_edit(self, index, mode, initial):
         self.finish_edit(commit=True)
         button = self.buttons[index]
-        info = button.place_info()
-        x = int(float(info.get("x") or 0))
-        y = int(float(info.get("y") or 0))
-        width = int(float(info.get("width") or 0)) or button.winfo_width()
-        height = int(float(info.get("height") or 0)) or button.winfo_height()
+        x = int(button.x)
+        y = int(button.y)
+        width = int(button.width)
+        height = int(button.height)
+
+        if mode == "path":
+            width = max(width, self.px(320))
+            height = max(height, self.px(52))
+            x = max(self.px(4), min(x, self.winfo_width() - width - self.px(4)))
 
         editor = tk.Entry(
             self,
@@ -504,7 +966,7 @@ class LaunchApp(tk.Tk):
             if not value:
                 value = "кнопка %d" % (index + 1)
             self.cfg["buttons"][index]["text"] = value
-            self.buttons[index].configure(text=value)
+            self.buttons[index].set_text(value)
             self.set_status("Кнопка переименована: «%s»" % value, COLOR_STATUS_NEUTRAL)
         self.save()
         return True
@@ -557,8 +1019,8 @@ class LaunchApp(tk.Tk):
         ).pack()
         button = self.buttons[index]
         tip.wm_geometry("+%d+%d" % (
-            button.winfo_rootx() + button.winfo_width() + self.px(12),
-            button.winfo_rooty() + button.winfo_height() // 2 - self.px(14),
+            self.board.winfo_rootx() + button.x + button.width + self.px(12),
+            self.board.winfo_rooty() + button.y + button.height // 2 - self.px(14),
         ))
         self.hint = tip
 
@@ -642,10 +1104,7 @@ class LaunchApp(tk.Tk):
         self.status_label.configure(fg=color)
 
     def paint(self, index, ok):
-        self.buttons[index].configure(
-            bg=COLOR_OK if ok else COLOR_FAIL,
-            activebackground=COLOR_OK if ok else COLOR_FAIL,
-        )
+        self.buttons[index].set_fill(COLOR_OK if ok else COLOR_FAIL)
 
     def choose_file(self, index):
         current = self.path_vars[index].get().strip().strip('"')
@@ -670,7 +1129,7 @@ class LaunchApp(tk.Tk):
 
     def launch(self, index):
         raw = self._clean_path(self.path_vars[index].get())
-        caption = self.buttons[index].cget("text")
+        caption = self.buttons[index].text
 
         if not raw:
             self.paint(index, False)
@@ -694,7 +1153,7 @@ class LaunchApp(tk.Tk):
         self.save()
 
     def _run_file(self, index, path):
-        caption = self.buttons[index].cget("text")
+        caption = self.buttons[index].text
         try:
             os.startfile(path)
         except OSError:
@@ -711,7 +1170,7 @@ class LaunchApp(tk.Tk):
         self.save()
 
     def _run_url(self, index, url):
-        caption = self.buttons[index].cget("text")
+        caption = self.buttons[index].text
         try:
             os.startfile(url)
         except OSError:
@@ -766,12 +1225,14 @@ class LaunchApp(tk.Tk):
         if self.editor is not None:
             self.finish_edit(commit=True)
         button = self.buttons[index]
+        self.board.tag_raise(button.tag)
         self.drag = {
             "index": index,
-            "dx": event.x_root - button.winfo_rootx(),
-            "dy": event.y_root - button.winfo_rooty(),
+            "dx": event.x_root - self.board.winfo_rootx() - button.x,
+            "dy": event.y_root - self.board.winfo_rooty() - button.y,
         }
         self.configure(cursor="fleur")
+        self.board.configure(cursor="fleur")
         return "break"
 
     def drag_motion(self, event):
@@ -779,10 +1240,10 @@ class LaunchApp(tk.Tk):
             return
         index = self.drag["index"]
         button = self.buttons[index]
-        x = event.x_root - self.drag["dx"] - self.winfo_rootx()
-        y = event.y_root - self.drag["dy"] - self.winfo_rooty()
+        x = event.x_root - self.drag["dx"] - self.board.winfo_rootx()
+        y = event.y_root - self.drag["dy"] - self.board.winfo_rooty()
         x, y = self._clamp_position(button, x, y)
-        button.place_configure(x=x, y=y)
+        button.move_to(x, y)
         self.positions[index] = [x, y]
 
     def end_drag(self, event=None):
@@ -797,8 +1258,8 @@ class LaunchApp(tk.Tk):
         self.save()
 
     def _clamp_position(self, button, x, y):
-        max_x = max(0, self.winfo_width() - button.winfo_width())
-        max_y = max(0, self.winfo_height() - button.winfo_height())
+        max_x = max(0, self.board.winfo_width() - button.width)
+        max_y = max(0, self.board.winfo_height() - button.height)
         return int(max(0, min(x, max_x))), int(max(0, min(y, max_y)))
 
     def enter_move_mode(self, index):
@@ -806,20 +1267,16 @@ class LaunchApp(tk.Tk):
         self.finish_edit(commit=True)
         self.hide_hint()
         self.move_index = index
-        button = self.buttons[index]
-        button.configure(cursor="fleur", command=lambda: None)
-        button.bind("<Button-1>", lambda event, i=index: self.begin_drag(event, i))
+        self.board.tag_raise(self.buttons[index].tag)
+        self.board.configure(cursor="fleur")
         self.set_status("Кнопка «%s»: тяните её мышью, чтобы переместить."
                         % self.caption(index), COLOR_STATUS_NEUTRAL)
 
     def exit_move_mode(self):
-        index = self.move_index
-        if index is None:
+        if self.move_index is None:
             return
         self.move_index = None
-        button = self.buttons[index]
-        button.unbind("<Button-1>")
-        button.configure(cursor="hand2", command=lambda i=index: self.launch(i))
+        self.board.configure(cursor="")
 
     def collect(self):
         cfg = {"settings": dict(self.s), "buttons": []}
@@ -829,6 +1286,7 @@ class LaunchApp(tk.Tk):
                 "text": spec.get("text") or ("кнопка %d" % (index + 1)),
                 "label": spec.get("label") or ("ред. %d" % (index + 1)),
                 "path": self.path_vars[index].get().strip(),
+                "shape": self.buttons[index].shape,
                 "x": int(round(x / self.scale)),
                 "y": int(round(y / self.scale)),
             })
